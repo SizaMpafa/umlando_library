@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+/* Tailwind v4 resets buttons to cursor:default; restore the pointer on enabled buttons. */
+button:not(:disabled),
+[role="button"]:not(:disabled) {
+  cursor: pointer;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  background: #040711;
+}
