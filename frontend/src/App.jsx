@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useEffect, useCallback } from "react";
+import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import geomagnetism from "geomagnetism";
 import {
   Waves, Search, Filter, Plus, X, ChevronDown, ChevronUp, BookOpen, Star, Moon,
   Package, Globe, MapPin, Sparkles, ArrowRight, Link2,
@@ -827,6 +828,247 @@ function AlignmentCompass() {
   };
 
   return (
+/* ------------------------------------------------------------------ */
+/* Directional alignment to Ekuphumleni Mountain (Clocolan)             */
+/*                                                                       */
+/* 29°04'31.7"S 27°37'28.3"E → decimal: -29.075472, 27.624528.           */
+/* The bearing math below (haversine distance + great-circle initial    */
+/* bearing) is exact spherical trigonometry — given two accurate lat/lng */
+/* pairs, it cannot be "roughly right," only right. The one variable     */
+/* that isn't guaranteed is the ACCURACY OF THE BROWSER'S OWN LOCATION   */
+/* READING: GPS on a phone is typically accurate to a few metres, but a  */
+/* desktop browser without GPS falls back to WiFi/IP-based positioning,  */
+/* which can be off by kilometres. The UI below shows the browser's own  */
+/* reported accuracy radius so that's never hidden.                     */
+/*                                                                       */
+/* LIVE ALIGNMENT: the bearing above is relative to TRUE north, but a    */
+/* phone compass points to MAGNETIC north — about 25° apart in Cape      */
+/* Town. The difference (magnetic declination) is computed offline from  */
+/* the World Magnetic Model via the `geomagnetism` package and applied,  */
+/* so "aligned" means aligned with the true bearing, not just with a     */
+/* compass needle.                                                      */
+/* ------------------------------------------------------------------ */
+const EKUPHUMLENI = { lat: -29.075472, lng: 27.624528, label: "Ekuphumleni Mountain (Clocolan)" };
+const toRad = (d) => (d * Math.PI) / 180;
+const toDeg = (r) => (r * 180) / Math.PI;
+
+function greatCircleBearing(lat1, lng1, lat2, lng2) {
+  const φ1 = toRad(lat1), φ2 = toRad(lat2), Δλ = toRad(lng2 - lng1);
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const φ1 = toRad(lat1), φ2 = toRad(lat2), Δφ = toRad(lat2 - lat1), Δλ = toRad(lng2 - lng1);
+  const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+const COMPASS_POINTS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+const bearingToCompass = (deg) => COMPASS_POINTS[Math.round(deg / 45) % 8];
+
+/* ── live alignment helpers ─────────────────────────────────────────── */
+const ALIGN_ENTER_DEG = 5; // "aligned" once you're within ±5° of the bearing…
+const ALIGN_EXIT_DEG = 8; //  …and it only lets go again past ±8°, so it doesn't flicker at the edge
+const SMOOTHING = 0.2; //     0–1: lower = steadier needle, higher = snappier
+const PUSH_INTERVAL_MS = 80; // sensors fire ~60×/s; re-render at ~12×/s
+
+/** Signed turn needed in degrees: positive = turn right (clockwise), negative = turn left. Range −180…180. */
+const turnNeeded = (targetBearing, heading) => ((targetBearing - heading + 540) % 360) - 180;
+
+const formatSigned = (d) => `${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(1)}°`;
+
+/** Magnetic declination at a point (degrees, east positive): true north = magnetic north + declination. */
+const declinationAt = (lat, lng) => {
+  try {
+    const d = geomagnetism.model().point([lat, lng]).decl;
+    return Number.isFinite(d) ? d : null;
+  } catch {
+    return null;
+  }
+};
+
+/** How far the page is rotated from the phone's natural orientation (0, 90, 180 or 270). */
+const getScreenAngle = () => {
+  const a = window.screen?.orientation?.angle ?? window.orientation ?? 0;
+  return ((a % 360) + 360) % 360;
+};
+
+/**
+ * Compass heading (degrees clockwise from MAGNETIC north) of the direction you're facing, from the
+ * W3C deviceorientation angles. alpha/beta/gamma describe the rotation R = Rz(alpha)·Rx(beta)·Ry(gamma);
+ * the three columns of R below are the phone's own x (right), y (top) and z (out of the screen) axes
+ * written in Earth coordinates (x = East, y = North, z = Up).
+ *
+ * "Facing" depends on how the phone is held, so we use whichever direction is pointing most horizontally:
+ *  - held flat like a compass → the top of the screen,
+ *  - held upright like a camera → the back of the phone.
+ */
+function headingFromOrientation(alpha, beta, gamma, screenAngle = 0) {
+  const a = toRad(alpha), b = toRad(beta), g = toRad(gamma);
+  const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b), cg = Math.cos(g), sg = Math.sin(g);
+
+  const X = [ca * cg - sa * sb * sg, sa * cg + ca * sb * sg, -cb * sg];
+  const Y = [-sa * cb, ca * cb, sb];
+  const Z = [ca * sg + sa * sb * cg, sa * sg - ca * sb * cg, cb * cg];
+
+  const neg = (v) => v.map((n) => -n);
+  const screenTop = [Y, X, neg(Y), neg(X)][Math.round(screenAngle / 90) % 4]; // follows the page when it's rotated
+  const back = neg(Z);
+
+  const horizontal = (v) => Math.hypot(v[0], v[1]);
+  const screenFacesUp = Z[2] > 0;
+  const v = screenFacesUp && horizontal(screenTop) >= horizontal(back) ? screenTop : back;
+
+  return (toDeg(Math.atan2(v[0], v[1])) + 360) % 360;
+}
+
+/**
+ * Live heading in degrees clockwise from TRUE north (null until the first reading arrives), plus an
+ * unwrapped angle for the on-screen needle so it never spins the long way round at 359° → 0°.
+ */
+function useLiveHeading(enabled, declination) {
+  const [reading, setReading] = useState({ heading: null, needleAngle: 0 });
+  const [error, setError] = useState("");
+  const declinationRef = useRef(declination);
+  declinationRef.current = declination;
+
+  useEffect(() => {
+    if (!enabled) {
+      setReading({ heading: null, needleAngle: 0 });
+      setError("");
+      return undefined;
+    }
+    setError("");
+
+    let sx = null, sy = null; // smoothed heading kept as a unit vector — averaging raw angles breaks at 359°→0°
+    let needle = null;
+    let lastPush = 0;
+    let gotReading = false;
+
+    const onOrientation = (e) => {
+      const screenAngle = getScreenAngle();
+      let magnetic;
+      if (typeof e.webkitCompassHeading === "number") {
+        magnetic = e.webkitCompassHeading + screenAngle; // iPhone: already compass-referenced (hold it flat)
+      } else if (e.alpha != null && (e.absolute === true || e.type === "deviceorientationabsolute")) {
+        magnetic = headingFromOrientation(e.alpha, e.beta ?? 0, e.gamma ?? 0, screenAngle);
+      } else {
+        return; // relative-only reading: no way to know where north is
+      }
+
+      if (!gotReading) {
+        gotReading = true;
+        setError("");
+      }
+
+      const raw = toRad((((magnetic + declinationRef.current) % 360) + 360) % 360);
+      sx = sx === null ? Math.cos(raw) : sx + SMOOTHING * (Math.cos(raw) - sx);
+      sy = sy === null ? Math.sin(raw) : sy + SMOOTHING * (Math.sin(raw) - sy);
+      const heading = (toDeg(Math.atan2(sy, sx)) + 360) % 360;
+      needle = needle === null ? heading : needle + ((((heading - needle) % 360) + 540) % 360) - 180;
+
+      const t = performance.now();
+      if (t - lastPush < PUSH_INTERVAL_MS) return;
+      lastPush = t;
+      setReading({ heading, needleAngle: needle });
+    };
+
+    // Chrome on Android exposes a compass-referenced stream under this name; iOS Safari uses plain "deviceorientation".
+    const eventName = "ondeviceorientationabsolute" in window ? "deviceorientationabsolute" : "deviceorientation";
+    window.addEventListener(eventName, onOrientation, true);
+    const timer = setTimeout(() => {
+      if (!gotReading) setError("No compass data from this device or browser. Check that motion/orientation access is allowed for this site.");
+    }, 2500);
+
+    return () => {
+      window.removeEventListener(eventName, onOrientation, true);
+      clearTimeout(timer);
+    };
+  }, [enabled]);
+
+  return { ...reading, error };
+}
+
+function AlignmentCompass() {
+  const [status, setStatus] = useState("idle"); // idle | loading | granted | denied | unsupported
+  const [result, setResult] = useState(null);
+  const [errorDetail, setErrorDetail] = useState("");
+  const [live, setLive] = useState(false);
+  const [liveError, setLiveError] = useState("");
+  const [aligned, setAligned] = useState(false);
+
+  const { heading, needleAngle, error: sensorError } = useLiveHeading(live && result?.declination != null, result?.declination ?? 0);
+  const turn = heading !== null && result ? turnNeeded(result.bearing, heading) : null;
+
+  useEffect(() => {
+    setAligned((was) => turn !== null && Math.abs(turn) <= (was ? ALIGN_EXIT_DEG : ALIGN_ENTER_DEG));
+  }, [turn]);
+
+  const detect = () => {
+    setLive(false);
+    if (!navigator.geolocation) { setStatus("unsupported"); return; }
+    setStatus("loading");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude, accuracy } = pos.coords;
+        const bearing = greatCircleBearing(latitude, longitude, EKUPHUMLENI.lat, EKUPHUMLENI.lng);
+        const distanceKm = haversineKm(latitude, longitude, EKUPHUMLENI.lat, EKUPHUMLENI.lng);
+        setResult({ bearing, distanceKm, accuracy, source: "gps", compass: bearingToCompass(bearing), declination: declinationAt(latitude, longitude) });
+        setStatus("granted");
+      },
+      (err) => {
+        // Surface the browser's own error text rather than a generic message —
+        // code 1 (PERMISSION_DENIED) via an iframe permissions-policy block reads
+        // very differently from the user actually clicking "Block" on the prompt.
+        const codeNames = { 1: "PERMISSION_DENIED", 2: "POSITION_UNAVAILABLE", 3: "TIMEOUT" };
+        setErrorDetail(`${codeNames[err.code] || "ERROR"}: ${err.message || "no further detail from the browser"}`);
+        setStatus("denied");
+      },
+      { enableHighAccuracy: true, timeout: 12000 }
+    );
+  };
+
+  // Fallback path: a plain network request, not the browser Permissions API —
+  // so it isn't subject to the iframe's geolocation permissions-policy block.
+  // Much less precise than GPS (city-level, sometimes worse) — labelled as such
+  // wherever it's shown, never presented with GPS-level confidence.
+  const detectViaIP = async () => {
+    setLive(false);
+    setStatus("loading");
+    try {
+      const res = await fetch("https://ipapi.co/json/");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (typeof data.latitude !== "number" || typeof data.longitude !== "number") throw new Error("No coordinates in response");
+      const bearing = greatCircleBearing(data.latitude, data.longitude, EKUPHUMLENI.lat, EKUPHUMLENI.lng);
+      const distanceKm = haversineKm(data.latitude, data.longitude, EKUPHUMLENI.lat, EKUPHUMLENI.lng);
+      setResult({ bearing, distanceKm, source: "ip", place: [data.city, data.country_name].filter(Boolean).join(", "), compass: bearingToCompass(bearing), declination: declinationAt(data.latitude, data.longitude) });
+      setStatus("granted");
+    } catch (e) {
+      setErrorDetail(`IP lookup failed: ${e.message}`);
+      setStatus("denied");
+    }
+  };
+
+  // Must run straight from a tap: iPhones only show the motion-sensor permission prompt for a user gesture.
+  const startLive = async () => {
+    setLiveError("");
+    try {
+      if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+        const answer = await DeviceOrientationEvent.requestPermission();
+        if (answer !== "granted") {
+          setLiveError("Motion & orientation access was denied. Allow it for this site in your browser settings to use live alignment.");
+          return;
+        }
+      }
+      setLive(true);
+    } catch (e) {
+      setLiveError(`Couldn't start the compass: ${e.message}`);
+    }
+  };
+
+  return (
     <div className="rounded-xl p-4 mt-4" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.08)" }}>
       <div className="text-[10px] uppercase tracking-widest mb-3 text-center" style={{ color: COLORS.slate, fontFamily: "'JetBrains Mono', monospace" }}>Align to Ekuphumleni</div>
 
@@ -863,6 +1105,13 @@ function AlignmentCompass() {
                 <line x1="50" y1="50" x2="50" y2="16" stroke={COLORS.gold} strokeWidth="3" strokeLinecap="round" />
                 <polygon points="50,8 44,20 56,20" fill={COLORS.gold} />
               </g>
+              {live && heading !== null && (
+                // dashed cyan needle = the way YOU are facing right now; when it sits on the gold arrow, you're aligned
+                <g style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: "50px 50px", transition: "transform 0.15s linear" }}>
+                  <line x1="50" y1="50" x2="50" y2="14" stroke={COLORS.cyan} strokeWidth="1.5" strokeDasharray="3 2.5" strokeLinecap="round" />
+                  <circle cx="50" cy="14" r="2.2" fill={COLORS.cyan} />
+                </g>
+              )}
               <circle cx="50" cy="50" r="3" fill={COLORS.gold} />
             </svg>
           </div>
@@ -871,6 +1120,28 @@ function AlignmentCompass() {
             <div className="text-[10px] mt-0.5" style={{ color: COLORS.slate, fontFamily: "'JetBrains Mono', monospace" }}>
               {Math.round(result.bearing)}° bearing · {result.distanceKm.toFixed(0)} km to {EKUPHUMLENI.label}
             </div>
+
+            {live && (
+              <div className="mt-2">
+                {heading === null ? (
+                  <p className="text-[11px]" style={{ color: sensorError ? COLORS.crimson : COLORS.slate }}>{sensorError || "Waiting for compass…"}</p>
+                ) : aligned ? (
+                  <div className="text-sm font-semibold" style={{ color: COLORS.cyan, fontFamily: "'Space Grotesk', sans-serif", textShadow: `0 0 8px ${hexToRgba(COLORS.cyan, 0.6)}` }}>
+                    ✓ Aligned with Ekuphumleni
+                  </div>
+                ) : (
+                  <div className="text-sm font-semibold" style={{ color: "#F3F6FC", fontFamily: "'Space Grotesk', sans-serif" }}>
+                    Turn {turn > 0 ? "right" : "left"} {Math.round(Math.abs(turn))}°
+                  </div>
+                )}
+                {heading !== null && (
+                  <div className="text-[10px] mt-0.5" style={{ color: COLORS.slate, fontFamily: "'JetBrains Mono', monospace" }}>
+                    You're facing {bearingToCompass(heading)} · {Math.round(heading)}°
+                  </div>
+                )}
+              </div>
+            )}
+
             {result.source === "gps" ? (
               <div className="text-[9px] mt-1" style={{ color: hexToRgba(COLORS.slate, 0.7) }}>
                 Device GPS accuracy: ±{Math.round(result.accuracy)}m
@@ -880,6 +1151,25 @@ function AlignmentCompass() {
                 Approximate — via IP{result.place ? ` (${result.place})` : ""}, not GPS. Can be off by many km.
               </div>
             )}
+
+            <div className="mt-3">
+              {live ? (
+                <button onClick={() => setLive(false)} className="w-full text-xs px-3 py-1.5 rounded-lg" style={{ color: COLORS.slate, border: "1px solid rgba(255,255,255,0.14)" }}>
+                  Stop live alignment
+                </button>
+              ) : (
+                <button onClick={startLive} disabled={result.declination == null} className="w-full flex items-center justify-center gap-2 rounded-lg py-2 text-xs font-medium disabled:opacity-40" style={{ background: hexToRgba(COLORS.cyan, 0.1), border: `1px solid ${hexToRgba(COLORS.cyan, 0.35)}`, color: COLORS.cyan }}>
+                  <Compass size={13} /> Start live alignment
+                </button>
+              )}
+              {liveError && <p className="text-[10px] mt-1.5" style={{ color: COLORS.crimson }}>{liveError}</p>}
+              {result.declination == null && <p className="text-[10px] mt-1.5" style={{ color: COLORS.crimson }}>Live alignment unavailable: couldn't work out magnetic declination for this location.</p>}
+              {live && result.declination != null && (
+                <p className="text-[9px] mt-1.5" style={{ color: hexToRgba(COLORS.slate, 0.7) }}>
+                  Hold your phone flat like a compass, top edge pointing where you face. Corrected to true north (magnetic declination {formatSigned(result.declination)}). If it seems off, wave the phone in a figure-8 to calibrate.
+                </p>
+              )}
+            </div>
           </div>
         </div>
       )}
