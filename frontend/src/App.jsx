@@ -1166,6 +1166,11 @@ function AlignmentCompass() {
               )}
               {liveError && <p className="text-[10px] mt-1.5" style={{ color: COLORS.crimson }}>{liveError}</p>}
               {result.declination == null && <p className="text-[10px] mt-1.5" style={{ color: COLORS.crimson }}>Live alignment unavailable: couldn't work out magnetic declination for this location.</p>}
+              {result.declination != null && (
+  <div className="text-[9px] mt-1" style={{ color: hexToRgba(COLORS.slate, 0.7) }}>
+    On a magnetic compass or compass app, face {Math.round((result.bearing - result.declination + 360) % 360)}° (the {Math.round(result.bearing)}° true bearing corrected by {formatSigned(result.declination)} declination)
+  </div>
+)}
               {live && result.declination != null && (
                 <p className="text-[9px] mt-1.5" style={{ color: hexToRgba(COLORS.slate, 0.7) }}>
                   Hold your phone flat like a compass, top edge pointing where you face. Corrected to true north (magnetic declination {formatSigned(result.declination)}). If it seems off, wave the phone in a figure-8 to calibrate.
