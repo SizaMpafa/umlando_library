@@ -841,30 +841,66 @@ function headingFromOrientation(alpha, beta, gamma, screenAngle = 0) {
   return (toDeg(Math.atan2(v[0], v[1])) + 360) % 360;
 }
 
+const permissionState = async (name) => {
+  try {
+    return (await navigator.permissions.query({ name })).state; // "granted" | "denied" | "prompt"
+  } catch {
+    return "unsupported"; // Safari/Firefox don't expose these permission names
+  }
+};
+
+/** Works out WHY no compass readings arrived, so the message says something useful instead of a generic guess. */
+async function explainNoCompass(stats) {
+  const sensors = ["accelerometer", "gyroscope", "magnetometer"];
+  const states = await Promise.all(sensors.map(permissionState));
+  const blocked = sensors.some((_, i) => states[i] === "denied");
+
+  const diagnostics = [
+    window.isSecureContext ? "https" : "NOT https",
+    `stream: ${stats.eventName}`,
+    `readings: ${stats.total}${stats.empty ? ` (${stats.empty} empty)` : ""}${stats.relative ? `, ${stats.relative} relative-only` : ""}`,
+    ...sensors.map((n, i) => `${n}: ${states[i]}`),
+  ].join(" · ");
+
+  let message;
+  if (!window.isSecureContext) message = "The compass only works on a secure (https) page.";
+  else if (blocked) message = "Motion sensors are blocked for this site. In Chrome: tap the icon left of the address bar → Permissions → Motion sensors → Allow, then reload the page.";
+  else if (stats.empty > 0 && stats.total === stats.empty) message = "This device reports no compass sensor (laptops and desktops usually don't have one). Try it on a phone.";
+  else if (stats.relative > 0) message = "This browser only gives relative orientation (no compass), so it can't tell where north is.";
+  else message = "No compass readings arrived. In Chrome check Settings → Site settings → Motion sensors, and that no sensors-off mode is active on the phone.";
+  return { message, diagnostics };
+}
+
 /**
  * Live heading in degrees clockwise from TRUE north (null until the first reading arrives), plus an
  * unwrapped angle for the on-screen needle so it never spins the long way round at 359° → 0°.
+ * If no usable readings arrive within 2.5s, `error` says why and `diagnostics` shows what the browser reported.
  */
 function useLiveHeading(enabled, declination) {
   const [reading, setReading] = useState({ heading: null, needleAngle: 0 });
-  const [error, setError] = useState("");
+  const [problem, setProblem] = useState({ error: "", diagnostics: "" });
   const declinationRef = useRef(declination);
   declinationRef.current = declination;
 
   useEffect(() => {
     if (!enabled) {
       setReading({ heading: null, needleAngle: 0 });
-      setError("");
+      setProblem({ error: "", diagnostics: "" });
       return undefined;
     }
-    setError("");
+    setProblem({ error: "", diagnostics: "" });
 
     let sx = null, sy = null; // smoothed heading kept as a unit vector — averaging raw angles breaks at 359°→0°
     let needle = null;
     let lastPush = 0;
     let gotReading = false;
+    let cancelled = false;
+    const stats = { total: 0, empty: 0, relative: 0, eventName: "" };
 
     const onOrientation = (e) => {
+      stats.total += 1;
+      if (e.alpha == null && typeof e.webkitCompassHeading !== "number") stats.empty += 1;
+
       const screenAngle = getScreenAngle();
       let magnetic;
       if (typeof e.webkitCompassHeading === "number") {
@@ -872,12 +908,13 @@ function useLiveHeading(enabled, declination) {
       } else if (e.alpha != null && (e.absolute === true || e.type === "deviceorientationabsolute")) {
         magnetic = headingFromOrientation(e.alpha, e.beta ?? 0, e.gamma ?? 0, screenAngle);
       } else {
+        if (e.alpha != null) stats.relative += 1;
         return; // relative-only reading: no way to know where north is
       }
 
       if (!gotReading) {
         gotReading = true;
-        setError("");
+        setProblem({ error: "", diagnostics: "" });
       }
 
       const raw = toRad((((magnetic + declinationRef.current) % 360) + 360) % 360);
@@ -893,19 +930,30 @@ function useLiveHeading(enabled, declination) {
     };
 
     // Chrome on Android exposes a compass-referenced stream under this name; iOS Safari uses plain "deviceorientation".
-    const eventName = "ondeviceorientationabsolute" in window ? "deviceorientationabsolute" : "deviceorientation";
+    const hasAbsolute = "ondeviceorientationabsolute" in window;
+    const eventName = hasAbsolute ? "deviceorientationabsolute" : "deviceorientation";
+    stats.eventName = eventName;
     window.addEventListener(eventName, onOrientation, true);
-    const timer = setTimeout(() => {
-      if (!gotReading) setError("No compass data from this device or browser. Check that motion/orientation access is allowed for this site.");
+
+    // Diagnostics only: if the compass stream is silent, is the plain (relative) stream at least alive?
+    const onRelative = (e) => { if (e.alpha != null) stats.relative += 1; };
+    if (hasAbsolute) window.addEventListener("deviceorientation", onRelative, true);
+
+    const timer = setTimeout(async () => {
+      if (gotReading) return;
+      const { message, diagnostics } = await explainNoCompass(stats);
+      if (!cancelled && !gotReading) setProblem({ error: message, diagnostics });
     }, 2500);
 
     return () => {
+      cancelled = true;
       window.removeEventListener(eventName, onOrientation, true);
+      if (hasAbsolute) window.removeEventListener("deviceorientation", onRelative, true);
       clearTimeout(timer);
     };
   }, [enabled]);
 
-  return { ...reading, error };
+  return { ...reading, error: problem.error, diagnostics: problem.diagnostics };
 }
 
 function AlignmentCompass() {
@@ -916,7 +964,7 @@ function AlignmentCompass() {
   const [liveError, setLiveError] = useState("");
   const [aligned, setAligned] = useState(false);
 
-  const { heading, needleAngle, error: sensorError } = useLiveHeading(live && result?.declination != null, result?.declination ?? 0);
+  const { heading, needleAngle, error: sensorError, diagnostics: sensorDiagnostics } = useLiveHeading(live && result?.declination != null, result?.declination ?? 0);
   const turn = heading !== null && result ? turnNeeded(result.bearing, heading) : null;
 
   useEffect(() => {
@@ -1042,7 +1090,10 @@ function AlignmentCompass() {
             {live && (
               <div className="mt-2">
                 {heading === null ? (
-                  <p className="text-[11px]" style={{ color: sensorError ? COLORS.crimson : COLORS.slate }}>{sensorError || "Waiting for compass…"}</p>
+                  <>
+  <p className="text-[11px]" style={{ color: sensorError ? COLORS.crimson : COLORS.slate }}>{sensorError || "Waiting for compass…"}</p>
+  {sensorDiagnostics && <p className="text-[9px] mt-1 break-words" style={{ color: hexToRgba(COLORS.crimson, 0.7), fontFamily: "'JetBrains Mono', monospace" }}>{sensorDiagnostics}</p>}
+</>
                 ) : aligned ? (
                   <div className="text-sm font-semibold" style={{ color: COLORS.cyan, fontFamily: "'Space Grotesk', sans-serif", textShadow: `0 0 8px ${hexToRgba(COLORS.cyan, 0.6)}` }}>
                     ✓ Aligned with Ekuphumleni
