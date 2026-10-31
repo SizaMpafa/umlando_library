@@ -766,7 +766,11 @@ function WaterfallBackdrop() {
 /* so "aligned" means aligned with the true bearing, not just with a     */
 /* compass needle.                                                      */
 /* ------------------------------------------------------------------ */
-const EKUPHUMLENI = { lat: -29.075472, lng: 27.624528, label: "Ekuphumleni Mountain (Clocolan)" };
+const EKUPHUMLENI = { lat: -29.075472, lng: 27.624528, label: "Ekuphumleni Mountain" };
+// Compass palette — every colour carries a meaning:
+const COMPASS_GOLD = "#9A8B36";  // royalty: the compass itself, because Ekuphumleni is the spiritual capital
+const COMPASS_WATER = "#89CFF0"; // baby blue: water energy / the great deity — the line pointing TO Ekuphumleni
+const COMPASS_FIRE = "#FF3B30";  // red: fire energy / ignition — the way YOU are facing right now
 const toRad = (d) => (d * Math.PI) / 180;
 const toDeg = (r) => (r * 180) / Math.PI;
 
@@ -1061,24 +1065,37 @@ function AlignmentCompass() {
       {status === "granted" && result && (
         <div>
           <div className="relative w-24 h-24 mx-auto mb-2">
-            <svg viewBox="0 0 100 100" className="w-full h-full">
-              <circle cx="50" cy="50" r="46" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1" />
-              <text x="50" y="11" textAnchor="middle" fontSize="8" fill={COLORS.slate}>N</text>
-              <text x="92" y="53" textAnchor="middle" fontSize="8" fill={COLORS.slate}>E</text>
-              <text x="50" y="97" textAnchor="middle" fontSize="8" fill={COLORS.slate}>S</text>
-              <text x="8" y="53" textAnchor="middle" fontSize="8" fill={COLORS.slate}>W</text>
+           <svg viewBox="0 0 100 100" className="w-full h-full" style={{ filter: `drop-shadow(0 0 6px ${hexToRgba(COMPASS_GOLD, 0.45)})` }}>
+              <defs>
+                {/* polished-gold face: brighter in the middle, deeper toward the rim */}
+                <radialGradient id="ekuCompassGold" cx="50%" cy="42%" r="62%">
+                  <stop offset="0%" stopColor="#FFE27A" />
+                  <stop offset="55%" stopColor={COMPASS_GOLD} />
+                  <stop offset="100%" stopColor="#B98300" />
+                </radialGradient>
+              </defs>
+              <circle cx="50" cy="50" r="46" fill="url(#ekuCompassGold)" stroke="#FFD54A" strokeWidth="2.2" />
+              <text x="50" y="11" textAnchor="middle" fontSize="8" fontWeight="700" fill={COLORS.deep}>N</text>
+              <text x="92" y="53" textAnchor="middle" fontSize="8" fontWeight="700" fill={COLORS.deep}>E</text>
+              <text x="50" y="97" textAnchor="middle" fontSize="8" fontWeight="700" fill={COLORS.deep}>S</text>
+              <text x="8" y="53" textAnchor="middle" fontSize="8" fontWeight="700" fill={COLORS.deep}>W</text>
               <g style={{ transform: `rotate(${result.bearing}deg)`, transformOrigin: "50px 50px", transition: "transform 0.6s ease" }}>
-                <line x1="50" y1="50" x2="50" y2="16" stroke={COLORS.gold} strokeWidth="3" strokeLinecap="round" />
-                <polygon points="50,8 44,20 56,20" fill={COLORS.gold} />
+                {/* baby-blue line TO Ekuphumleni; the thin dark edge keeps it readable on the gold */}
+                <line x1="50" y1="50" x2="50" y2="16" stroke={COLORS.deep} strokeOpacity="0.6" strokeWidth="5.4" strokeLinecap="round" />
+                <polygon points="50,6.2 42.4,21.2 57.6,21.2" fill={COLORS.deep} fillOpacity="0.6" />
+                <line x1="50" y1="50" x2="50" y2="16" stroke={COMPASS_WATER} strokeWidth="3" strokeLinecap="round" />
+                <polygon points="50,8 44,20 56,20" fill={COMPASS_WATER} />
               </g>
               {live && heading !== null && (
-                // dashed cyan needle = the way YOU are facing right now; when it sits on the gold arrow, you're aligned
+                // dashed red needle = the way YOU are facing right now; when it sits on the blue arrow, you're aligned
                 <g style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: "50px 50px", transition: "transform 0.15s linear" }}>
-                  <line x1="50" y1="50" x2="50" y2="14" stroke={COLORS.cyan} strokeWidth="1.5" strokeDasharray="3 2.5" strokeLinecap="round" />
-                  <circle cx="50" cy="14" r="2.2" fill={COLORS.cyan} />
+                  <line x1="50" y1="50" x2="50" y2="14" stroke={COLORS.deep} strokeOpacity="0.6" strokeWidth="3.4" strokeDasharray="3 2.5" strokeLinecap="round" />
+                  <circle cx="50" cy="14" r="3.5" fill={COLORS.deep} fillOpacity="0.6" />
+                  <line x1="50" y1="50" x2="50" y2="14" stroke={COMPASS_FIRE} strokeWidth="1.5" strokeDasharray="3 2.5" strokeLinecap="round" />
+                  <circle cx="50" cy="14" r="2.2" fill={COMPASS_FIRE} />
                 </g>
               )}
-              <circle cx="50" cy="50" r="3" fill={COLORS.gold} />
+              <circle cx="50" cy="50" r="3" fill={COLORS.deep} />
             </svg>
           </div>
           <div className="text-center">
