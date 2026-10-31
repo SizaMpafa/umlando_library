@@ -768,7 +768,7 @@ function WaterfallBackdrop() {
 /* ------------------------------------------------------------------ */
 const EKUPHUMLENI = { lat: -29.075472, lng: 27.624528, label: "Ekuphumleni Mountain" };
 // Compass palette — every colour carries a meaning:
-const COMPASS_GOLD = "#9A8B36";  // royalty: the compass itself, because Ekuphumleni is the spiritual capital
+const COMPASS_GOLD = "#F2B705";  // royalty: the compass itself, because Ekuphumleni is the spiritual capital
 const COMPASS_WATER = "#89CFF0"; // baby blue: water energy / the great deity — the line pointing TO Ekuphumleni
 const COMPASS_FIRE = "#FF3B30";  // red: fire energy / ignition — the way YOU are facing right now
 const toRad = (d) => (d * Math.PI) / 180;
@@ -853,25 +853,58 @@ const permissionState = async (name) => {
   }
 };
 
-/** Works out WHY no compass readings arrived, so the message says something useful instead of a generic guess. */
+/** Tries to start one browser sensor and reports what happened: "ok", an error name, or "n/a" if the browser lacks it. */
+const probeSensor = (className) =>
+  new Promise((resolve) => {
+    const Sensor = window[className];
+    if (typeof Sensor !== "function") return resolve("n/a");
+    let sensor;
+    let finished = false;
+    const finish = (outcome) => {
+      if (finished) return;
+      finished = true;
+      try { sensor?.stop(); } catch { /* already stopped */ }
+      resolve(outcome);
+    };
+    try {
+      sensor = new Sensor({ frequency: 10 });
+      sensor.addEventListener("reading", () => finish("ok"));
+      sensor.addEventListener("error", (e) => finish(e.error?.name || "error")); // NotReadableError = no such sensor / can't be read
+      sensor.start();
+      setTimeout(() => finish("silent"), 1500);
+    } catch (e) {
+      finish(e?.name || "error");
+    }
+  });
+
+
+/** Works out WHY no compass readings arrived, so the message says something true instead of a generic guess. */
 async function explainNoCompass(stats) {
-  const sensors = ["accelerometer", "gyroscope", "magnetometer"];
-  const states = await Promise.all(sensors.map(permissionState));
-  const blocked = sensors.some((_, i) => states[i] === "denied");
+  const perms = ["accelerometer", "gyroscope", "magnetometer"];
+  const [states, probes] = await Promise.all([
+    Promise.all(perms.map(permissionState)),
+    Promise.all(["AbsoluteOrientationSensor", "Accelerometer", "Gyroscope"].map(probeSensor)),
+  ]);
+  const [compassProbe, accelProbe, gyroProbe] = probes;
+  const blocked = states.includes("denied") || probes.some((p) => p === "NotAllowedError" || p === "SecurityError");
+  const motionWorks = accelProbe === "ok" || gyroProbe === "ok";
 
   const diagnostics = [
     window.isSecureContext ? "https" : "NOT https",
-    `stream: ${stats.eventName}`,
-    `readings: ${stats.total}${stats.empty ? ` (${stats.empty} empty)` : ""}${stats.relative ? `, ${stats.relative} relative-only` : ""}`,
-    ...sensors.map((n, i) => `${n}: ${states[i]}`),
+    stats.eventName,
+    `readings ${stats.total}${stats.empty ? ` (${stats.empty} empty)` : ""}${stats.relative ? `, ${stats.relative} relative-only` : ""}`,
+    `permissions ${perms.map((n, i) => `${n[0]}:${states[i]}`).join(" ")}`,
+    `sensors compass:${compassProbe} accel:${accelProbe} gyro:${gyroProbe}`,
   ].join(" · ");
 
   let message;
   if (!window.isSecureContext) message = "The compass only works on a secure (https) page.";
   else if (blocked) message = "Motion sensors are blocked for this site. In Chrome: tap the icon left of the address bar → Permissions → Motion sensors → Allow, then reload the page.";
-  else if (stats.empty > 0 && stats.total === stats.empty) message = "This device reports no compass sensor (laptops and desktops usually don't have one). Try it on a phone.";
+  else if (compassProbe === "ok") message = "The compass sensor works, but the browser isn't passing its readings to the page. Reload and try again — if it keeps happening, the grey line below is what to send me.";
+  else if (motionWorks) message = "This device's motion sensors work, but it has no working compass (magnetometer), so it can't tell where north is. Use a magnetic compass, or a phone that has one.";
   else if (stats.relative > 0) message = "This browser only gives relative orientation (no compass), so it can't tell where north is.";
-  else message = "No compass readings arrived. In Chrome check Settings → Site settings → Motion sensors, and that no sensors-off mode is active on the phone.";
+  else message = "The browser can't read any motion sensors on this device. That's normal on a laptop. On a phone, make sure no sensors-off or battery-saver mode is on, then reload — if it still fails, the phone may not have these sensors.";
+
   return { message, diagnostics };
 }
 
@@ -1150,6 +1183,11 @@ function AlignmentCompass() {
               )}
               {liveError && <p className="text-[10px] mt-1.5" style={{ color: COLORS.crimson }}>{liveError}</p>}
               {result.declination == null && <p className="text-[10px] mt-1.5" style={{ color: COLORS.crimson }}>Live alignment unavailable: couldn't work out magnetic declination for this location.</p>}
+              {result.declination != null && (
+  <div className="text-[9px] mt-1" style={{ color: hexToRgba(COLORS.slate, 0.7) }}>
+    On a magnetic compass or compass app, face {Math.round((result.bearing - result.declination + 360) % 360)}° (the {Math.round(result.bearing)}° true bearing corrected by {formatSigned(result.declination)} declination)
+  </div>
+)}
               {live && result.declination != null && (
                 <p className="text-[9px] mt-1.5" style={{ color: hexToRgba(COLORS.slate, 0.7) }}>
                   Hold your phone flat like a compass, top edge pointing where you face. Corrected to true north (magnetic declination {formatSigned(result.declination)}). If it seems off, wave the phone in a figure-8 to calibrate.
